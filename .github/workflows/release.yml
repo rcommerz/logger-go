@@ -1,0 +1,215 @@
+name: Release Package
+
+on:
+    push:
+        tags:
+            - "v*.*.*"
+    workflow_dispatch:
+        inputs:
+            version:
+                description: "Version to release (e.g., 1.0.0)"
+                required: true
+                type: string
+            create-tag:
+                description: "Create git tag for this version"
+                required: false
+                type: boolean
+                default: true
+
+permissions:
+    contents: write
+
+jobs:
+    validate:
+        runs-on: ubuntu-latest
+        name: Validate Package
+
+        outputs:
+            version: ${{ steps.get-version.outputs.version }}
+            tag-name: ${{ steps.get-version.outputs.tag-name }}
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.23"
+                  cache: true
+
+            - name: Get version
+              id: get-version
+              run: |
+                  if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+                    VERSION="${{ github.event.inputs.version }}"
+                    TAG_NAME="v${VERSION}"
+                  else
+                    TAG_NAME="${GITHUB_REF#refs/tags/}"
+                    VERSION="${TAG_NAME#v}"
+                  fi
+                  echo "version=${VERSION}" >> $GITHUB_OUTPUT
+                  echo "tag-name=${TAG_NAME}" >> $GITHUB_OUTPUT
+                  echo "📦 Version: ${VERSION}"
+                  echo "🏷️  Tag: ${TAG_NAME}"
+
+            - name: Validate version format
+              run: |
+                  VERSION="${{ steps.get-version.outputs.version }}"
+                  if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "❌ Invalid version format: $VERSION"
+                    echo "Expected format: X.Y.Z (e.g., 1.0.0)"
+                    exit 1
+                  fi
+                  echo "✅ Version format is valid"
+
+            - name: Check if tag exists
+              if: github.event_name == 'workflow_dispatch'
+              run: |
+                  TAG_NAME="${{ steps.get-version.outputs.tag-name }}"
+                  if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+                    echo "❌ Tag $TAG_NAME already exists"
+                    exit 1
+                  fi
+                  echo "✅ Tag $TAG_NAME is available"
+
+            - name: Download dependencies
+              run: go mod download
+
+            - name: Verify dependencies
+              run: go mod verify
+
+            - name: Run tests with coverage
+              run: go test -v -race -covermode=atomic -coverprofile=coverage.out ./...
+
+            - name: Verify 95% coverage
+              run: |
+                  COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+                  echo "Total coverage: ${COVERAGE}%"
+                  if (( $(echo "$COVERAGE < 95.0" | bc -l) )); then
+                    echo "❌ Coverage is below 95%. Current: ${COVERAGE}%"
+                    echo "Publishing requires at least 95% test coverage."
+                    exit 1
+                  fi
+                  echo "✅ Coverage verified at ${COVERAGE}%"
+
+            - name: Check package files
+              run: |
+                  echo "📦 Checking required package files..."
+                  required_files=("README.md" "LICENSE" "CHANGELOG.md" "go.mod")
+
+                  for file in "${required_files[@]}"; do
+                    if [ ! -f "$file" ]; then
+                      echo "❌ Missing required file: $file"
+                      exit 1
+                    fi
+                    echo "✅ Found: $file"
+                  done
+
+            - name: Validate go.mod
+              run: |
+                  echo "📝 Validating go.mod..."
+                  go mod tidy -v
+                  if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
+                    echo "❌ go.mod or go.sum is not up to date"
+                    echo "Run 'go mod tidy' and commit the changes"
+                    git diff go.mod go.sum
+                    exit 1
+                  fi
+                  echo "✅ go.mod is valid and up to date"
+
+    release:
+        needs: validate
+        runs-on: ubuntu-latest
+        name: Create GitHub Release
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.23"
+
+            - name: Configure Git
+              run: |
+                  git config --global user.name "github-actions[bot]"
+                  git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+            - name: Create and push tag
+              if: github.event_name == 'workflow_dispatch' && github.event.inputs.create-tag == 'true'
+              run: |
+                  TAG_NAME="${{ needs.validate.outputs.tag-name }}"
+                  VERSION="${{ needs.validate.outputs.version }}"
+
+                  echo "Creating tag: $TAG_NAME"
+                  git tag -a "$TAG_NAME" -m "Release version $VERSION"
+                  git push origin "$TAG_NAME"
+
+                  echo "✅ Tag $TAG_NAME created and pushed"
+
+            - name: Extract changelog for this version
+              id: changelog
+              run: |
+                  VERSION="${{ needs.validate.outputs.version }}"
+                  echo "Extracting changelog for version $VERSION..."
+
+                  if [ -f "CHANGELOG.md" ]; then
+                    # Extract the section for this version
+                    CHANGELOG=$(sed -n "/## \[${VERSION}\]/,/## \[/p" CHANGELOG.md | sed '$d' | tail -n +2)
+
+                    if [ -z "$CHANGELOG" ]; then
+                      # If specific version not found, use "Unreleased" section
+                      CHANGELOG=$(sed -n "/## \[Unreleased\]/,/## \[/p" CHANGELOG.md | sed '$d' | tail -n +2)
+                    fi
+
+                    if [ -z "$CHANGELOG" ]; then
+                      CHANGELOG="Release version ${VERSION}"
+                    fi
+                  else
+                    CHANGELOG="Release version ${VERSION}"
+                  fi
+
+                  # Save to file for multiline content
+                  echo "$CHANGELOG" > /tmp/changelog.txt
+                  echo "changelog-file=/tmp/changelog.txt" >> $GITHUB_OUTPUT
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  tag_name: ${{ needs.validate.outputs.tag-name }}
+                  name: Release ${{ needs.validate.outputs.version }}
+                  body_path: ${{ steps.changelog.outputs.changelog-file }}
+                  draft: false
+                  prerelease: false
+                  generate_release_notes: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Summary
+              run: |
+                  VERSION="${{ needs.validate.outputs.version }}"
+                  TAG_NAME="${{ needs.validate.outputs.tag-name }}"
+
+                  echo "## 🎉 Release Summary" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Version**: $VERSION" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Tag**: $TAG_NAME" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Go Module**: github.com/rcommerz/logger-go@$TAG_NAME" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "### 📦 Installation" >> $GITHUB_STEP_SUMMARY
+                  echo '```bash' >> $GITHUB_STEP_SUMMARY
+                  echo "go get github.com/rcommerz/logger-go@$TAG_NAME" >> $GITHUB_STEP_SUMMARY
+                  echo '```' >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "### 📝 Next Steps" >> $GITHUB_STEP_SUMMARY
+                  echo "1. The package will be available on pkg.go.dev within a few minutes" >> $GITHUB_STEP_SUMMARY
+                  echo "2. Check https://pkg.go.dev/github.com/rcommerz/logger-go@$TAG_NAME" >> $GITHUB_STEP_SUMMARY
+                  echo "3. The Go proxy will cache the module automatically" >> $GITHUB_STEP_SUMMARY
+
+                  echo "✅ Release $VERSION published successfully!"
