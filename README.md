@@ -1,7 +1,7 @@
 # logger-go
 
 [![Go Version](https://img.shields.io/badge/go-1.24%2B-blue)](https://golang.org/dl/)
-[![GoDoc](https://pkg.go.dev/badge/github.com/rcommerz/logger-go)](https://pkg.go.dev/github.com/rcommerz/logger-go)
+[![GoDoc](https://pkg.go.dev/badge/github.com/rcommerz/logger-go)](https://goreportcard.com/badge/github.com/rcommerz/logger-go)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rcommerz/logger-go)](https://goreportcard.com/report/github.com/rcommerz/logger-go)
 [![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)](https://github.com/rcommerz/logger-go)
